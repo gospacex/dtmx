@@ -1,0 +1,12 @@
+# 编译产物
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+
+# 本地环境（口令、DSN 一律不入库）
+.env
+*.local.yaml
