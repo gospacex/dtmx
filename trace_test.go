@@ -24,15 +24,14 @@ func TestExecTxEmitsDbSpan(t *testing.T) {
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
 	// nil tx 不该 panic —— 域服在 barrier 事务缺失时要拿到清晰错误。
-	if _, err := ExecTx(t.Context(), nil, OpUpdate, "update stocks set available=available-1 where id=1", true); err == nil {
+	if _, err := ExecTx(t.Context(), nil, "update stocks set available=available-1 where id=1", true); err == nil {
 		t.Fatal("nil tx 必须报错而不是 panic")
 	}
 
 	// 真事务（假驱动）：只需要语句执行过即可观察 span。
 	tx, done := beginFake(t)
 	defer done()
-	_, err := ExecTx(t.Context(), tx, OpUpdate,
-		"update t_stock set available = available - ? where id = ?", true, 1, 1)
+	_, err := ExecTx(t.Context(), tx, "update t_stock set available = available - ? where id = ?", true, 1, 1)
 	if err != nil {
 		t.Fatalf("ExecTx 执行失败：%v", err)
 	}
@@ -74,7 +73,7 @@ func TestExecTxSpanNameIsDbPrefixed(t *testing.T) {
 
 	tx, done := beginFake(t)
 	defer done()
-	if _, err := ExecTx(t.Context(), tx, OpCreate, "insert into t_log (id) values (?)", true, 7); err != nil {
+	if _, err := ExecTx(t.Context(), tx, "insert into t_log (id) values (?)", true, 7); err != nil {
 		t.Fatalf("ExecTx 执行失败：%v", err)
 	}
 	for _, s := range rec.Ended() {
@@ -96,7 +95,7 @@ func TestExecTxTraceOnFalse(t *testing.T) {
 
 	tx, done := beginFake(t)
 	defer done()
-	if _, err := ExecTx(t.Context(), tx, OpQuery, "select available from t_stock where id = ?", false, 1); err != nil {
+	if _, err := ExecTx(t.Context(), tx, "select available from t_stock where id = ?", false, 1); err != nil {
 		t.Fatalf("ExecTx 执行失败：%v", err)
 	}
 	for _, s := range rec.Ended() {
@@ -136,13 +135,13 @@ func TestTableNameOf(t *testing.T) {
 // TestExecTxRejectsNilTxWithoutPanic barrier 事务缺失时必须给清晰错误：
 // 分支面拿到 nil 再 panic 会把整个 gRPC server 进程带下去，故障现场全丢。
 func TestExecTxRejectsNilTxWithoutPanic(t *testing.T) {
-	if _, err := ExecTx(t.Context(), nil, OpUpdate, "update stocks set available=0", true); err == nil {
+	if _, err := ExecTx(t.Context(), nil, "update stocks set available=0", true); err == nil {
 		t.Fatal("nil tx 必须报错")
 	}
-	if err := QueryRowTx(t.Context(), nil, OpQuery, "select 1", true, []any{new(int)}); err == nil {
+	if err := QueryRowTx(t.Context(), nil, "select 1", true, []any{new(int)}); err == nil {
 		t.Fatal("nil tx 的查询也必须报错")
 	}
-	if err := QueryRowTx(t.Context(), nil, OpQuery, "select 1", true, nil); err == nil {
+	if err := QueryRowTx(t.Context(), nil, "select 1", true, nil); err == nil {
 		t.Fatal("无 Scan 目标也必须报错（否则 span 白开一条）")
 	}
 }
@@ -150,3 +149,24 @@ func TestExecTxRejectsNilTxWithoutPanic(t *testing.T) {
 // 反向探针：把 QueryRowTx 里的 Scan 挪到 span.End() 之后（即退回 *sql.Row 的惰性
 // 形态），本文件其余用例不会红 —— 所以这条判据的价值在于提醒：Scan 必须在
 // span 生命周期内，改动时留意。
+
+// TestDbOpOfDerivesVerbFromSQL op 由 SQL 推导后，写语句不再可能被标成读。
+// 第一版的回归正是这里：调用方拿变量名而非字面量，声明式 op 全落成 OpQuery，
+// 于是 Jaeger 上 20 处 INSERT/UPDATE 全显示 db.query。
+func TestDbOpOfDerivesVerbFromSQL(t *testing.T) {
+	cases := []struct{ sql, want string }{
+		{"insert into order_items(a) values(?)", "create"},
+		{"INSERT INTO orders(a) VALUES(1)", "create"},
+		{"replace into outbox(a) values(1)", "create"},
+		{"update stocks set available=available-1 where id=?", "update"},
+		{"UPDATE orders set status=? where id=?", "update"},
+		{"delete from stock_logs where id=?", "delete"},
+		{"select id from orders where order_no=?", "query"},
+		{"  \n\t UPDATE stocks set available=0", "update"},
+	}
+	for _, c := range cases {
+		if got := dbOpOf(c.sql); got != c.want {
+			t.Errorf("dbOpOf(%q) = %q，want %q", c.sql, got, c.want)
+		}
+	}
+}

@@ -19,11 +19,40 @@ const tracerName = "github.com/gospacex/dbx/orm"
 // db.* 的 op 取值，**逐字对齐 dbx/orm/gorm_tracing.go** 的四个 callback。
 // 验收断言（trace_e2e_test.go 的 ④）按 `db.` 前缀筛 span，故口径不能各写各的。
 const (
-	OpCreate = "create"
-	OpQuery  = "query"
-	OpUpdate = "update"
-	OpDelete = "delete"
+	opCreate = "create"
+	opQuery  = "query"
+	opUpdate = "update"
+	opDelete = "delete"
 )
+
+// dbOpOf 从 SQL 语句推出 db.operation 的取值。
+//
+// **为什么 op 必须由 SQL 推导、而不是让调用方声明**：第一版把 op 做成了必填参数，
+// 结果四域 20 处调用点全传成了 `OpQuery` —— 调用点拿到的是 `query`、`dtmLogSQL`
+// 这类**变量名**，不是 SQL 字面量，按首字母判动词必然落到默认值；而 INSERT/UPDATE
+// 被标成 `db.query`，比没有 span 更坏：Jaeger 上看不出写在哪，容量与慢查询分析
+// 会把写负载算到读上。op 是 SQL 本身的属性，让调用方「声明」等于给错值开门，
+// 故这里直接去掉这个参数。
+func dbOpOf(query string) string {
+	lower := strings.ToLower(strings.TrimSpace(query))
+	// 跳过前导注释与空白，避免 /* 库存扣减 */ insert into … 被判成默认分支。
+	for _, kw := range []struct {
+		prefix string
+		op     string
+	}{
+		{"insert into", opCreate},
+		{"replace into", opCreate},
+		{"update", opUpdate},
+		{"delete from", opDelete},
+		{"select", opQuery},
+	} {
+		if strings.HasPrefix(lower, kw.prefix) {
+			return kw.op
+		}
+	}
+	// 认不出来的语句不猜：按 query 记，宁可标签粗一点，也不要把写标成读以外的任何东西。
+	return opQuery
+}
 
 // ExecTx 在 dtm barrier 事务上执行一条语句，并开一个与 dbx gorm callback 同形的
 // `db.<op>` span。
@@ -36,13 +65,14 @@ const (
 //
 // traceOn=false 时本件是空操作（只执行不埋点）：db 层开关与业务分层开关各管一段，
 // 与 otelx/layer.Begin 的注释口径一致。
-func ExecTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool, args ...any) (sql.Result, error) {
+func ExecTx(ctx context.Context, tx *sql.Tx, query string, traceOn bool, args ...any) (sql.Result, error) {
 	if tx == nil {
 		return nil, errors.New("dtmx: ExecTx 需要 barrier 事务（*sql.Tx），nil 会让写入脱离事务")
 	}
 	if !traceOn {
 		return tx.ExecContext(ctx, query, args...)
 	}
+	op := dbOpOf(query)
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "db."+op)
 	defer func() {
 		span.End()
@@ -73,7 +103,7 @@ func ExecTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool, arg
 // 「span 已结束但库里还没查到」的错位。故把 Scan 一并纳入 span 生命周期。
 //
 // dest 至少要有一个可 Scan 的目标；用法与 `sql.Row.Scan` 完全一致。
-func QueryRowTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool, dest []any, args ...any) error {
+func QueryRowTx(ctx context.Context, tx *sql.Tx, query string, traceOn bool, dest []any, args ...any) error {
 	if tx == nil {
 		return errors.New("dtmx: QueryRowTx 需要 barrier 事务（*sql.Tx），nil 会让查询脱离事务")
 	}
@@ -83,6 +113,7 @@ func QueryRowTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool,
 	if !traceOn {
 		return tx.QueryRowContext(ctx, query, args...).Scan(dest...)
 	}
+	op := opQuery
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "db."+op)
 	defer span.End()
 
