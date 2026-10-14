@@ -23,9 +23,12 @@ dtm（[distributed transaction manager](https://github.com/dtm-labs/dtm)）的 G
 3. **不得 import launchx / configx / dbx。** 本仓被 launchx 以
    `replace => ../dtmx` 消费，反向 import 会成环。由 `TestDtmxDoesNotDependOnLaunchx`
    守卫。续链走 `otelx/propagation`（launchx 的 `Inject`/`Extract` 背后即它）。
-4. **`ExtractParent` 空 traceparent 原样放行。** dtm 的异步补偿 / 重启续推不带
-   traceparent，这类回调按「新根 trace + `biz.dtm.gid` 关联」处理，
-   凭空造同 ID 孤儿 span 是自欺。
+4. **`ExtractParent` 空 traceparent 原样放行。** 常规补偿/二阶段**不会**拿到空
+   traceparent —— dtm 按 step 共享载荷（Saga 的 compensate 与 action 同取
+   `BinPayloads[i]`；TCC 的 cancel 与 confirm 是同一份 `TransBranch` 的副本），
+   补偿分支拿到的是真 traceparent，会挂回**正向那条 trace**。只有 dtm 重启续推
+   这类没有原始载荷上下文的推进才会落新 trace；那种情况按 `biz.dtm.gid` 关联，
+   凭空造同 ID 孤儿 span 才是自欺。
 5. **`Call` 的回调只准用 `tx` 落库。** 换成 gorm 或另开连接会脱离 barrier 的事务，
    守卫随之失效。
 
