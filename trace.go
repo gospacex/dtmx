@@ -36,15 +36,20 @@ const (
 func dbOpOf(query string) string {
 	lower := strings.ToLower(strings.TrimSpace(query))
 	// 跳过前导注释与空白，避免 /* 库存扣减 */ insert into … 被判成默认分支。
+	// 按**首关键字**判，不写全 "insert into"：MySQL 允许
+	// `insert ignore into` / `insert low_priority into`，写成 `insert into`
+	// 匹配不上就会掉进默认分支，把建单那条 INSERT 记成 db.query ——
+	// 正是第一版修掉的那个错，只是换了副词。
 	for _, kw := range []struct {
 		prefix string
 		op     string
 	}{
-		{"insert into", opCreate},
-		{"replace into", opCreate},
+		{"insert", opCreate},
+		{"replace", opCreate},
 		{"update", opUpdate},
-		{"delete from", opDelete},
+		{"delete", opDelete},
 		{"select", opQuery},
+		{"with", opQuery},
 	} {
 		if strings.HasPrefix(lower, kw.prefix) {
 			return kw.op
@@ -147,8 +152,10 @@ func tableNameOf(query string) string {
 
 	var re *regexp.Regexp
 	switch {
-	case strings.HasPrefix(lower, "insert into"), strings.HasPrefix(lower, "replace into"):
-		re = regexp.MustCompile(`(?is)^\s*(?:insert\s+into|replace\s+into)\s+` + "`?" + `([\w.]+)` + "`?")
+	case strings.HasPrefix(lower, "insert"), strings.HasPrefix(lower, "replace"):
+		// `insert ignore into` / `insert low_priority into` 的修饰词要吃掉，
+		// 否则抓到的表名会是 "ignore"。
+		re = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:(?:ignore|low_priority|high_priority|delayed)\s+)*into\s+` + "`?" + `([\w.]+)` + "`?")
 	case strings.HasPrefix(lower, "update"):
 		// 修饰词只认 MySQL 的这三个。写成 `[a-z_]+` 会把**表名本身**吃掉
 		// （`update t_stock set …` → 抓到 "set"），因为表名恰好也匹配 [a-z_]+。

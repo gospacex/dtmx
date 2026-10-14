@@ -163,6 +163,9 @@ func TestDbOpOfDerivesVerbFromSQL(t *testing.T) {
 		{"delete from stock_logs where id=?", "delete"},
 		{"select id from orders where order_no=?", "query"},
 		{"  \n\t UPDATE stocks set available=0", "update"},
+		{"insert ignore into orders(a) values(1)", "create"},
+		{"INSERT LOW_PRIORITY INTO orders(a) values(1)", "create"},
+		{"insert into orders(a) values(1) on duplicate key update b=1", "create"},
 	}
 	for _, c := range cases {
 		if got := dbOpOf(c.sql); got != c.want {
