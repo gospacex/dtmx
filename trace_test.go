@@ -132,3 +132,21 @@ func TestTableNameOf(t *testing.T) {
 		t.Errorf("无表名的语句应返回空串，实际 %q", got)
 	}
 }
+
+// TestExecTxRejectsNilTxWithoutPanic barrier 事务缺失时必须给清晰错误：
+// 分支面拿到 nil 再 panic 会把整个 gRPC server 进程带下去，故障现场全丢。
+func TestExecTxRejectsNilTxWithoutPanic(t *testing.T) {
+	if _, err := ExecTx(t.Context(), nil, OpUpdate, "update stocks set available=0", true); err == nil {
+		t.Fatal("nil tx 必须报错")
+	}
+	if err := QueryRowTx(t.Context(), nil, OpQuery, "select 1", true, []any{new(int)}); err == nil {
+		t.Fatal("nil tx 的查询也必须报错")
+	}
+	if err := QueryRowTx(t.Context(), nil, OpQuery, "select 1", true, nil); err == nil {
+		t.Fatal("无 Scan 目标也必须报错（否则 span 白开一条）")
+	}
+}
+
+// 反向探针：把 QueryRowTx 里的 Scan 挪到 span.End() 之后（即退回 *sql.Row 的惰性
+// 形态），本文件其余用例不会红 —— 所以这条判据的价值在于提醒：Scan 必须在
+// span 生命周期内，改动时留意。

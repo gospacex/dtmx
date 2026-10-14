@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // tracerName 与 dbx 的 gorm callback 用同一个 instrumentation 名，
@@ -67,13 +66,42 @@ func ExecTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool, arg
 	return res, err
 }
 
-// spanAttrsEnd 收尾时挂属性 —— 供调用点在拿到结果后补业务维度（如影响行数）。
-// 单独导出是因为 ExecTx 的 span 随函数返回即结束，调用点若想补属性得自己开 span；
-// 这里给出的是与 ExecTx 同形的一段，省得各处自己拼 tracer 名。
-func spanAttrsEnd(ctx context.Context, span trace.Span, kvs ...attribute.KeyValue) {
-	if span != nil && span.IsRecording() {
-		span.SetAttributes(kvs...)
+// QueryRowTx 在 barrier 事务上查一行并 Scan，同时开 `db.<op>` span。
+//
+// 为什么不直接用 `sql.Row`：`*sql.Row` 是惰性的 —— `QueryRowContext` 返回时
+// 结果集还没读，span 若在那时就 End，覆盖不到真正的读取过程，Jaeger 上会出现
+// 「span 已结束但库里还没查到」的错位。故把 Scan 一并纳入 span 生命周期。
+//
+// dest 至少要有一个可 Scan 的目标；用法与 `sql.Row.Scan` 完全一致。
+func QueryRowTx(ctx context.Context, tx *sql.Tx, op, query string, traceOn bool, dest []any, args ...any) error {
+	if tx == nil {
+		return errors.New("dtmx: QueryRowTx 需要 barrier 事务（*sql.Tx），nil 会让查询脱离事务")
 	}
+	if len(dest) == 0 {
+		return errors.New("dtmx: QueryRowTx 需要至少一个 Scan 目标")
+	}
+	if !traceOn {
+		return tx.QueryRowContext(ctx, query, args...).Scan(dest...)
+	}
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "db."+op)
+	defer span.End()
+
+	attrs := []attribute.KeyValue{
+		attribute.String("db.operation", op),
+		attribute.String("db.system", "mysql"),
+		attribute.String("db.query.text", query),
+	}
+	if tbl := tableNameOf(query); tbl != "" {
+		attrs = append(attrs, attribute.String("db.sql.table", tbl))
+	}
+	span.SetAttributes(attrs...)
+
+	err := tx.QueryRowContext(ctx, query, args...).Scan(dest...)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // tableNameOf 从 SQL 里取表名，供 db.sql.table 属性用。与 dbx 的解析同口径：
